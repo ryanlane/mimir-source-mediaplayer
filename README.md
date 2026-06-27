@@ -1,0 +1,152 @@
+# mimir-source-mediaplayer
+
+A Mimir channel that displays the **poster of the currently playing video** from Plex, Jellyfin, or Emby. Designed to work as a [now-playing interrupt source](../mimir-docs/) — it pre-empts gallery or slideshow content whenever a video is active, then reverts when playback stops.
+
+---
+
+## How it works
+
+The channel polls your media server every 15 seconds. When it detects an active session it:
+
+1. Fetches the poster image directly from the server (movie poster, or series poster for TV episodes)
+2. Renders it at the display's native resolution — cropped to fill or letterboxed, with an optional title overlay
+3. Fires a push event with `is_playing: true` so any scene using this channel as an interrupt source switches to showing the poster immediately
+4. When playback stops (or is paused), fires `is_playing: false` and the scene reverts to its base content after the configured resume delay
+
+---
+
+## Supported backends
+
+| Backend | Default port | Auth method |
+|---------|-------------|-------------|
+| **Plex** | `32400` | Plex token (`X-Plex-Token`) |
+| **Jellyfin** | `8096` | API key (`X-Emby-Token`) |
+| **Emby** | `8096` | API key (`X-Emby-Token`) |
+
+---
+
+## Installation
+
+Install it like any other Mimir plugin — either via the Plugin Registry in the Mimir admin UI, or manually:
+
+```bash
+git clone https://github.com/ryanlane/mimir-source-mediaplayer.git
+pip install -r mimir-source-mediaplayer/requirements.txt
+```
+
+Then point Mimir at the plugin directory in your server configuration.
+
+---
+
+## Configuration
+
+Open the **Media Player** channel page in the Mimir admin UI and fill in:
+
+### Connection
+
+| Setting | Description |
+|---------|-------------|
+| **Media Server** | `plex`, `jellyfin`, or `emby` |
+| **Server URL** | Full URL with port — e.g. `http://192.168.1.10:32400` (Plex) or `http://192.168.1.10:8096` (Jellyfin/Emby) |
+| **API Token / Key** | See below for how to obtain this per backend |
+| **Username Filter** | Optional. Leave blank to show any active session; set to a username to only follow that user's playback |
+| **Verify SSL** | Uncheck for servers with self-signed certificates (common on local networks) |
+
+### Display
+
+| Setting | Description |
+|---------|-------------|
+| **Poster Fit** | `crop` fills the display (may trim edges); `letterbox` shows the full poster with black bars |
+| **Show Title Overlay** | Draws the title, series name, episode number, and year in a bar at the bottom of the poster |
+| **Overlay Theme** | `dark` (white text on dark bar) or `light` (dark text on light bar) |
+
+---
+
+## Getting your API token
+
+### Plex
+
+The easiest method:
+
+1. Open [plex.tv/claim](https://www.plex.tv/claim/) while signed in to get a short-lived claim token
+2. Or open Plex Web → any media item → ··· menu → **Get Info** → **View XML** — the token appears in the URL as `X-Plex-Token=...`
+3. Or use the [Plex account page](https://app.plex.tv/desktop/#!/account) → **Authorized Devices** to see active sessions and tokens
+
+Alternatively, install [`plexapi`](https://python-plexapi.readthedocs.io/) and run:
+
+```python
+from plexapi.myplex import MyPlexAccount
+account = MyPlexAccount('email@example.com', 'password')
+plex = account.resource('My Plex Server').connect()
+print(plex._token)
+```
+
+### Jellyfin
+
+1. Open the Jellyfin dashboard → **Administration** → **API Keys**
+2. Click **+** to create a new key, give it a name (e.g. `mimir`)
+3. Copy the generated key
+
+### Emby
+
+1. Open the Emby dashboard → **API Keys** (under Advanced)
+2. Click **New API Key**, give it a name
+3. Copy the generated key
+
+---
+
+## Multi-user servers
+
+If multiple users share the server, the channel shows the first active session it finds. To follow a specific user, set **Username Filter** to their exact username (case-insensitive).
+
+If two users are watching simultaneously, the channel shows the session it encounters first in the API response — typically the most recently started one on Plex, or the first in the sessions list on Jellyfin/Emby.
+
+---
+
+## TV episodes vs. movies
+
+For **TV episodes**, the channel uses the **series poster** rather than the episode thumbnail — so you see the show's artwork rather than a scene still. For **movies**, it uses the movie poster directly.
+
+The title overlay (when enabled) shows:
+
+- **Movie:** title on the first line, year below
+- **Episode:** series name + episode number (e.g. `Breaking Bad · S01E01`) on the first line, episode title below
+
+---
+
+## Using as a now-playing interrupt
+
+After configuring the channel, add it as a **Now Playing** source on a scene in the Program Editor:
+
+1. Open the scene you want to configure in the Mimir admin UI
+2. In the **NOW PLAYING** section, click **+ Add Source** and select **Media Player Now Playing**
+3. Set a **Priority** (1–100; higher values win when multiple now-playing sources are active)
+4. Set a **Resume Delay** — how many seconds to wait after playback stops before reverting to the scene's base content (prevents flicker between consecutive videos)
+
+The scene will show its normal content (gallery, slideshow, etc.) when nothing is playing, and switch to the media poster the moment playback starts.
+
+---
+
+## Requirements
+
+- Python 3.8+
+- `pillow` — poster rendering
+- `requests` — HTTP client
+- `fastapi` — plugin API
+
+No Playwright or external renderer required — rendering is done entirely with Pillow.
+
+---
+
+## Settings reference
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `backend` | string | `plex` | `plex` \| `jellyfin` \| `emby` |
+| `server_url` | string | `""` | Full server URL including port |
+| `api_token` | string | `""` | Plex token or Jellyfin/Emby API key |
+| `username` | string | `""` | Filter sessions by username (blank = any) |
+| `verify_ssl` | boolean | `false` | Verify SSL certificate |
+| `fit_mode` | string | `crop` | `crop` \| `letterbox` |
+| `show_info` | boolean | `true` | Show title overlay bar |
+| `theme` | string | `dark` | `dark` \| `light` overlay |
