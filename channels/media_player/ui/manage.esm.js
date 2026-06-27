@@ -59,6 +59,10 @@ const STYLES = `
   .btn-copy.copied { color: var(--color-success, #4ade80); border-color: var(--color-success, #4ade80); }
   .webhook-note { font-size: 0.75rem; color: var(--color-text-tertiary, #666); line-height: 1.5; }
   .webhook-note a { color: var(--color-accent, #00c851); }
+  .webhook-status { font-size: 0.75rem; color: var(--color-text-tertiary, #666); display: flex; align-items: center; gap: 6px; }
+  .webhook-status-dot { width: 7px; height: 7px; border-radius: 50%; background: #444; flex-shrink: 0; }
+  .webhook-status-dot--ok { background: var(--color-success, #4ade80); }
+  .webhook-status-dot--warn { background: var(--color-warning, #f59e0b); }
 `;
 
 class MediaPlayerManager extends HTMLElement {
@@ -73,7 +77,7 @@ class MediaPlayerManager extends HTMLElement {
       // display
       fitMode: 'crop', showInfo: true, theme: 'dark',
       // status
-      configured: false, session: null, sessionStatus: null,
+      configured: false, session: null, sessionStatus: null, webhook: null,
     };
     this._pollTimer = null;
   }
@@ -154,7 +158,7 @@ class MediaPlayerManager extends HTMLElement {
       try {
         const resp = await fetch(`${API()}/status`);
         const data = await resp.json();
-        this._set({ session: data.session || null, sessionStatus: data.status || null });
+        this._set({ session: data.session || null, sessionStatus: data.status || null, webhook: data.webhook || null });
       } catch (_) {}
     };
     poll();
@@ -250,6 +254,7 @@ class MediaPlayerManager extends HTMLElement {
               When active, the poll interval backs off to 2 minutes (keeps working as a fallback).<br>
               <a href="https://support.plex.tv/articles/115002267687-webhooks/" target="_blank" rel="noopener noreferrer">Webhook setup guide →</a>
             </p>
+            ${this._webhookStatusHtml(s.webhook)}
           </div>
           ` : ''}
 
@@ -281,6 +286,30 @@ class MediaPlayerManager extends HTMLElement {
         if (btn) { btn.textContent = 'Copied!'; btn.classList.add('copied'); setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000); }
       });
     });
+  }
+
+  _relativeTime(epochSeconds) {
+    if (!epochSeconds) return null;
+    const ago = Math.floor(Date.now() / 1000 - epochSeconds);
+    if (ago < 5)   return 'just now';
+    if (ago < 60)  return `${ago}s ago`;
+    if (ago < 3600) return `${Math.floor(ago / 60)}m ago`;
+    return `${Math.floor(ago / 3600)}h ago`;
+  }
+
+  _webhookStatusHtml(webhook) {
+    if (!webhook?.last_event_at) {
+      return `<div class="webhook-status">
+        <div class="webhook-status-dot"></div>
+        No events received yet — check the URL is correct and Plex can reach this server.
+      </div>`;
+    }
+    const age = Math.floor(Date.now() / 1000 - webhook.last_event_at);
+    const dotClass = age < 300 ? 'webhook-status-dot--ok' : 'webhook-status-dot--warn';
+    return `<div class="webhook-status">
+      <div class="webhook-status-dot ${dotClass}"></div>
+      Last event: <strong>${webhook.last_event_type || 'unknown'}</strong> — ${this._relativeTime(webhook.last_event_at)}
+    </div>`;
   }
 
   _sessionHtml(session) {

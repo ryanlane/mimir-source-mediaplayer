@@ -65,7 +65,8 @@ class MediaPlayerChannel:
         self._poller_task: Optional[asyncio.Task] = None
 
         # Webhook state (Plex only)
-        self._webhook_last_event: float = 0.0  # epoch time of last received webhook
+        self._webhook_last_event: float = 0.0   # epoch time of last received webhook
+        self._webhook_last_event_type: str = ""  # last Plex event name received
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -115,6 +116,7 @@ class MediaPlayerChannel:
 
     def _fire_push(self, session: Dict[str, Any]) -> None:
         if not self._push_listener:
+            logger.warning("[media_player] push dropped — listener not registered (channel may not be active in any scene)")
             return
         fp = self._session_fp(session)
         payload = {
@@ -188,16 +190,22 @@ class MediaPlayerChannel:
     def process_plex_webhook(self, data: Dict[str, Any]) -> None:
         """Handle a parsed Plex webhook payload dict. Called from the POST /webhook endpoint."""
         event = data.get("event", "")
+        account = data.get("Account", {}).get("title", "")
+        metadata = data.get("Metadata", {})
+        media_title = metadata.get("title", "")
+        media_type  = metadata.get("type", "")
+
+        logger.info("[media_player] webhook received — event=%r account=%r title=%r type=%r",
+                    event, account, media_title, media_type)
+
+        self._webhook_last_event = time.time()
+        self._webhook_last_event_type = event
 
         # Honour username filter
         if self.settings.username:
-            account = data.get("Account", {}).get("title", "")
             if account.lower() != self.settings.username.lower():
-                logger.debug("[media_player] webhook ignored — account %r != filter %r", account, self.settings.username)
+                logger.info("[media_player] webhook skipped — account %r doesn't match filter %r", account, self.settings.username)
                 return
-
-        metadata = data.get("Metadata", {})
-        self._webhook_last_event = time.time()
 
         if event in ("media.play", "media.resume"):
             session = self._normalize_webhook_metadata(metadata, is_playing=True)
@@ -211,7 +219,9 @@ class MediaPlayerChannel:
                 self._cached_poster = None
                 self._cached_poster_url = None
                 self._fire_push(session)
-                logger.info("[media_player] webhook %s — %s: %s", event, session.get("media_type"), session.get("title"))
+                logger.info("[media_player] push fired for %s: %s", session.get("media_type"), session.get("title"))
+            else:
+                logger.info("[media_player] duplicate fingerprint — push suppressed")
 
         elif event == "media.pause":
             if self._cached_session:
@@ -222,7 +232,7 @@ class MediaPlayerChannel:
                     self._last_session_fp = fp
                     self._fire_push(session)
             self._was_playing = False
-            logger.info("[media_player] webhook pause")
+            logger.info("[media_player] webhook pause handled")
 
         elif event == "media.stop":
             self._cached_session = None
@@ -231,7 +241,13 @@ class MediaPlayerChannel:
                 self._was_playing = False
                 self._last_session_fp = None
                 self._fire_stop()
-            logger.info("[media_player] webhook stop")
+            logger.info("[media_player] webhook stop handled")
+
+        elif event in ("media.scrobble", "media.rate"):
+            logger.info("[media_player] webhook event %r acknowledged (no display action)", event)
+
+        else:
+            logger.info("[media_player] webhook event %r unhandled", event)
 
     # ── Polling ───────────────────────────────────────────────────────────────
 
@@ -443,6 +459,10 @@ class MediaPlayerChannel:
             return JSONResponse({
                 "status":  self._cached_status,
                 "session": self._cached_session,
+                "webhook": {
+                    "last_event_at":   self._webhook_last_event or None,
+                    "last_event_type": self._webhook_last_event_type or None,
+                } if self._webhook_last_event else None,
             })
 
         @router.get("/settings")
