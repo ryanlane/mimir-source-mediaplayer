@@ -1,0 +1,108 @@
+{
+  "id": "com.mimir.mediaplayer",
+  "name": "Media Player Now Playing",
+  "description": "Displays the poster of the currently playing video from Plex, Jellyfin, or Emby. Use as a now-playing interrupt source to pre-empt gallery content whenever a video is active.",
+  "version": "1.0.0",
+  "type": "embedded",
+  "entry_point": "channel.py",
+  "class_name": "MediaPlayerChannel",
+  "icon": "tv",
+  "author": "Ryan Lane",
+  "tags": ["plex", "jellyfin", "emby", "now-playing", "video", "media"],
+  "schemaVersion": "2.4",
+  "settingsType": "advanced",
+  "config": {
+    "supports_upload": false,
+    "supports_subchannels": false,
+    "requires_api_key": true
+  },
+  "requirements": {
+    "python": ">=3.8",
+    "dependencies": ["fastapi", "pillow", "requests"]
+  },
+  "user_data_dirs": ["data"],
+  "settings": {
+    "defaults": {
+      "backend": "plex",
+      "server_url": "",
+      "api_token": "",
+      "username": "",
+      "verify_ssl": false,
+      "fit_mode": "crop",
+      "show_info": true,
+      "theme": "dark"
+    },
+    "schema": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["plex", "jellyfin", "emby"],
+          "title": "Media Server",
+          "description": "Which media server to connect to",
+          "default": "plex"
+        },
+        "server_url": {
+          "type": "string",
+          "title": "Server URL",
+          "description": "Full URL including port, e.g. http://192.168.1.10:32400 (Plex) or http://192.168.1.10:8096 (Jellyfin/Emby)"
+        },
+        "api_token": {
+          "type": "string",
+          "title": "API Token / Key",
+          "description": "Plex token (found in Plex Web → Account → Authorized Devices) or Jellyfin/Emby API key"
+        },
+        "username": {
+          "type": "string",
+          "title": "Username Filter",
+          "description": "Only track sessions from this user (leave blank to show any active session)"
+        },
+        "verify_ssl": {
+          "type": "boolean",
+          "title": "Verify SSL Certificate",
+          "description": "Disable for servers with self-signed certificates on local networks",
+          "default": false
+        },
+        "fit_mode": {
+          "type": "string",
+          "enum": ["crop", "letterbox"],
+          "title": "Poster Fit",
+          "description": "crop = fill display (may trim edges); letterbox = show full poster with black bars",
+          "default": "crop"
+        },
+        "show_info": {
+          "type": "boolean",
+          "title": "Show Title Overlay",
+          "description": "Display the title, series, and year in a bar at the bottom of the poster",
+          "default": true
+        },
+        "theme": {
+          "type": "string",
+          "enum": ["dark", "light"],
+          "title": "Overlay Theme",
+          "description": "Color scheme for the title overlay bar",
+          "default": "dark"
+        }
+      }
+    }
+  },
+  "ui": [
+    {
+      "route": "/mediaplayer-nowplaying",
+      "element": "x-mediaplayer-manager",
+      "moduleUrl": "/api/channels/com.mimir.mediaplayer/ui/manage.esm.js",
+      "nav": {
+        "label": "Media Player",
+        "icon": "tv"
+      },
+      "renderMode": "element"
+    }
+  ],
+  "endpoints": [
+    { "path": "/manifest",       "method": "GET",  "description": "Channel manifest" },
+    { "path": "/request-image",  "method": "POST", "description": "Render now-playing poster" },
+    { "path": "/settings",       "method": "GET",  "description": "Get settings" },
+    { "path": "/settings",       "method": "PUT",  "description": "Update settings" },
+    { "path": "/status",         "method": "GET",  "description": "Current playback session info" }
+  ]
+}
