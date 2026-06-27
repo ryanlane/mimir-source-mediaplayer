@@ -18,8 +18,8 @@ const STYLES = `
   .hint { font-size: 0.75rem; color: var(--color-text-tertiary, #666); margin-top: 4px; }
   .actions { display: flex; gap: 10px; align-items: center; margin-top: 18px; }
   .btn { padding: 8px 18px; border: none; border-radius: var(--radius-sm, 4px); cursor: pointer; font-size: 0.9rem; }
-  .btn-primary { background: var(--color-primary, #036600); color: #fff; }
-  .btn-primary:hover { background: var(--color-primary-hover, #02550b); }
+  .btn-primary { background: light-dark(#036600, #2e7a30); color: #fff; }
+  .btn-primary:hover { background: light-dark(#024d00, #3a963c); }
   .btn-primary:disabled { opacity: 0.5; cursor: default; }
   .btn-secondary { background: var(--color-surface, #222); color: var(--color-text, #e8e8e8); border: 1px solid var(--color-border, #333); }
   .btn-secondary:hover { background: var(--color-surface-hover, #2a2a2a); }
