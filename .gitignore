@@ -1,13 +1,29 @@
+# Python bytecode
 __pycache__/
 *.py[cod]
+*.pyo
+
+# Distribution / packaging
 *.egg-info/
-.eggs/
 dist/
 build/
+.eggs/
 *.egg
 
-channels/media_player/data/
-
+# Virtual environments
 .env
-*.log
+.venv
+venv/
+env/
+
+# Runtime channel data (settings, cache, downloaded assets)
+channels/*/data/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
 .DS_Store
+Thumbs.db

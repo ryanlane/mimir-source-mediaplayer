@@ -1,3 +1,4 @@
 fastapi
 pillow
 requests
+python-multipart

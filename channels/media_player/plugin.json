@@ -2,7 +2,7 @@
   "id": "com.mimir.mediaplayer",
   "name": "Media Player Now Playing",
   "description": "Displays the poster of the currently playing video from Plex, Jellyfin, or Emby. Use as a now-playing interrupt source to pre-empt gallery content whenever a video is active.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "embedded",
   "entry_point": "channel.py",
   "class_name": "MediaPlayerChannel",
@@ -103,6 +103,7 @@
     { "path": "/request-image",  "method": "POST", "description": "Render now-playing poster" },
     { "path": "/settings",       "method": "GET",  "description": "Get settings" },
     { "path": "/settings",       "method": "PUT",  "description": "Update settings" },
-    { "path": "/status",         "method": "GET",  "description": "Current playback session info" }
+    { "path": "/status",         "method": "GET",  "description": "Current playback session info" },
+    { "path": "/webhook",        "method": "POST", "description": "Plex webhook receiver (Plex Pass required)" }
   ]
 }

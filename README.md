@@ -6,12 +6,22 @@ A Mimir channel that displays the **poster of the currently playing video** from
 
 ## How it works
 
-The channel polls your media server every 15 seconds. When it detects an active session it:
+The channel detects active playback and fires push events so scenes switch to the poster instantly:
 
 1. Fetches the poster image directly from the server (movie poster, or series poster for TV episodes)
 2. Renders it at the display's native resolution — cropped to fill or letterboxed, with an optional title overlay
-3. Fires a push event with `is_playing: true` so any scene using this channel as an interrupt source switches to showing the poster immediately
+3. Fires a push event with `is_playing: true` so any scene using this channel as an interrupt source switches immediately
 4. When playback stops (or is paused), fires `is_playing: false` and the scene reverts to its base content after the configured resume delay
+
+### Plex — webhooks (recommended)
+
+For Plex, the channel supports [webhooks](https://support.plex.tv/articles/115002267687-webhooks/) for instant response. Configure the webhook URL shown in the settings page under **Settings → Webhooks → Add Webhook** in Plex. When webhooks are active the poll interval backs off to 2 minutes (safety net only).
+
+> **Note:** Plex webhooks require a Plex Pass subscription.
+
+### Polling fallback
+
+Without webhooks (or for Jellyfin/Emby), the channel polls the server every 15 seconds.
 
 ---
 
@@ -60,26 +70,21 @@ Open the **Media Player** channel page in the Mimir admin UI and fill in:
 | **Show Title Overlay** | Draws the title, series name, episode number, and year in a bar at the bottom of the poster |
 | **Overlay Theme** | `dark` (white text on dark bar) or `light` (dark text on light bar) |
 
+### Webhooks (Plex only)
+
+When backend is set to Plex, the settings page shows a **Webhooks** section with a pre-filled URL to paste into Plex. No additional configuration in Mimir is needed — the endpoint is always active.
+
+The webhook URL is: `http://<your-mimir-server>:5000/api/channels/com.mimir.mediaplayer/webhook`
+
 ---
 
 ## Getting your API token
 
 ### Plex
 
-The easiest method:
+Plex uses an authentication token rather than an API key. See the official guide for how to find yours:
 
-1. Open [plex.tv/claim](https://www.plex.tv/claim/) while signed in to get a short-lived claim token
-2. Or open Plex Web → any media item → ··· menu → **Get Info** → **View XML** — the token appears in the URL as `X-Plex-Token=...`
-3. Or use the [Plex account page](https://app.plex.tv/desktop/#!/account) → **Authorized Devices** to see active sessions and tokens
-
-Alternatively, install [`plexapi`](https://python-plexapi.readthedocs.io/) and run:
-
-```python
-from plexapi.myplex import MyPlexAccount
-account = MyPlexAccount('email@example.com', 'password')
-plex = account.resource('My Plex Server').connect()
-print(plex._token)
-```
+**[Finding an Authentication Token (X-Plex-Token) — Plex Support](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)**
 
 ### Jellyfin
 

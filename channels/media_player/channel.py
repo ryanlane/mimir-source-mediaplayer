@@ -28,7 +28,8 @@ from . import renderer as _renderer
 
 logger = logging.getLogger("mimir.channels.media_player")
 
-_POLL_INTERVAL = 15  # seconds between server polls
+_POLL_INTERVAL         = 15   # seconds between polls (no webhook activity)
+_POLL_INTERVAL_WEBHOOK = 120  # seconds between polls when webhooks are active
 _USER_AGENT = "MimirMediaPlayer/1.0 (https://github.com/ryanlane/mimir)"
 _PLUGIN_ID = "com.mimir.mediaplayer"
 
@@ -62,6 +63,9 @@ class MediaPlayerChannel:
         self._was_playing: bool = False
         self._last_session_fp: Optional[str] = None
         self._poller_task: Optional[asyncio.Task] = None
+
+        # Webhook state (Plex only)
+        self._webhook_last_event: float = 0.0  # epoch time of last received webhook
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -148,6 +152,87 @@ class MediaPlayerChannel:
         except Exception as exc:
             logger.warning("[media_player] stop-event fire failed: %s", exc)
 
+    # ── Webhook (Plex only) ───────────────────────────────────────────────────
+
+    def _normalize_webhook_metadata(self, metadata: Dict[str, Any], is_playing: bool) -> Dict[str, Any]:
+        """Build a session dict from a Plex webhook Metadata block."""
+        media_type = metadata.get("type", "movie")  # "movie" | "episode" | "track"
+        if media_type == "episode":
+            thumb_path   = metadata.get("grandparentThumb") or metadata.get("thumb", "")
+            series_title = metadata.get("grandparentTitle")
+            season_num   = metadata.get("parentIndex")
+            episode_num  = metadata.get("index")
+        else:
+            thumb_path   = metadata.get("thumb", "")
+            series_title = None
+            season_num   = None
+            episode_num  = None
+
+        poster_url = None
+        if thumb_path and self.settings.server_url and self.settings.api_token:
+            base = self.settings.server_url.rstrip("/")
+            poster_url = f"{base}{thumb_path}?X-Plex-Token={self.settings.api_token}"
+
+        return {
+            "title":        metadata.get("title", "Unknown"),
+            "year":         metadata.get("year"),
+            "media_type":   media_type,
+            "series_title": series_title,
+            "season_num":   season_num,
+            "episode_num":  episode_num,
+            "is_playing":   is_playing,
+            "poster_url":   poster_url,
+            "session_key":  str(metadata.get("ratingKey", f"wh-{time.time()}")),
+        }
+
+    def process_plex_webhook(self, data: Dict[str, Any]) -> None:
+        """Handle a parsed Plex webhook payload dict. Called from the POST /webhook endpoint."""
+        event = data.get("event", "")
+
+        # Honour username filter
+        if self.settings.username:
+            account = data.get("Account", {}).get("title", "")
+            if account.lower() != self.settings.username.lower():
+                logger.debug("[media_player] webhook ignored — account %r != filter %r", account, self.settings.username)
+                return
+
+        metadata = data.get("Metadata", {})
+        self._webhook_last_event = time.time()
+
+        if event in ("media.play", "media.resume"):
+            session = self._normalize_webhook_metadata(metadata, is_playing=True)
+            fp = self._session_fp(session)
+            self._cached_session = session
+            self._cached_status = "ok"
+            self._was_playing = True
+            if fp != self._last_session_fp:
+                self._last_session_fp = fp
+                self._image_cache.clear()
+                self._cached_poster = None
+                self._cached_poster_url = None
+                self._fire_push(session)
+                logger.info("[media_player] webhook %s — %s: %s", event, session.get("media_type"), session.get("title"))
+
+        elif event == "media.pause":
+            if self._cached_session:
+                session = {**self._cached_session, "is_playing": False}
+                self._cached_session = session
+                fp = self._session_fp(session)
+                if fp != self._last_session_fp:
+                    self._last_session_fp = fp
+                    self._fire_push(session)
+            self._was_playing = False
+            logger.info("[media_player] webhook pause")
+
+        elif event == "media.stop":
+            self._cached_session = None
+            self._cached_status = "no_session"
+            if self._was_playing:
+                self._was_playing = False
+                self._last_session_fp = None
+                self._fire_stop()
+            logger.info("[media_player] webhook stop")
+
     # ── Polling ───────────────────────────────────────────────────────────────
 
     def _fetch_session(self) -> tuple[Optional[Dict[str, Any]], str]:
@@ -185,7 +270,10 @@ class MediaPlayerChannel:
                     logger.info("[media_player] playback stopped, stop event fired")
             except Exception as exc:
                 logger.warning("[media_player] poller loop error: %s", exc)
-            await asyncio.sleep(_POLL_INTERVAL)
+            # Back off if Plex webhooks are actively delivering events
+            webhook_age = time.time() - self._webhook_last_event
+            interval = _POLL_INTERVAL_WEBHOOK if webhook_age < 300 else _POLL_INTERVAL
+            await asyncio.sleep(interval)
 
     def _ensure_poller(self) -> None:
         if self._poller_task is None or self._poller_task.done():
@@ -380,6 +468,25 @@ class MediaPlayerChannel:
             self._cached_poster = None
             self._cached_poster_url = None
             return JSONResponse({"success": True, "settings": self._masked_settings()})
+
+        @router.post("/webhook")
+        async def plex_webhook(request: Request):
+            """Receive Plex webhook events (Plex Pass required).
+            Configure this URL in Plex: Settings → Webhooks → Add Webhook.
+            """
+            if self.settings.backend != "plex":
+                return JSONResponse({"ok": False, "error": "webhook only supported for plex backend"}, status_code=400)
+            try:
+                form = await request.form()
+                payload_str = form.get("payload", "")
+                if not payload_str:
+                    return JSONResponse({"ok": False, "error": "missing payload field"}, status_code=400)
+                data = json.loads(payload_str)
+            except Exception as exc:
+                logger.warning("[media_player] webhook parse error: %s", exc)
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            self.process_plex_webhook(data)
+            return JSONResponse({"ok": True})
 
         @router.post("/request-image")
         async def request_image(request: Request):

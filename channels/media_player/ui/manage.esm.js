@@ -45,6 +45,20 @@ const STYLES = `
   .section-title { font-size: 0.78rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
     color: var(--color-text-tertiary, #666); margin-bottom: 12px; }
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .webhook-box { background: var(--color-background-alt, #111); border: 1px solid var(--color-border, #333);
+    border-radius: var(--radius-md, 8px); padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .webhook-url-row { display: flex; gap: 8px; align-items: center; }
+  .webhook-url { flex: 1; font-family: monospace; font-size: 0.78rem; background: var(--color-surface, #1a1a1a);
+    border: 1px solid var(--color-border, #333); border-radius: var(--radius-sm, 4px);
+    padding: 6px 10px; color: var(--color-text, #e8e8e8); white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; user-select: all; cursor: text; }
+  .btn-copy { padding: 6px 12px; border: 1px solid var(--color-border, #333); border-radius: var(--radius-sm, 4px);
+    background: var(--color-surface, #222); color: var(--color-text, #e8e8e8); cursor: pointer; font-size: 0.82rem;
+    white-space: nowrap; flex-shrink: 0; transition: background 100ms; }
+  .btn-copy:hover { background: var(--color-surface-hover, #2a2a2a); }
+  .btn-copy.copied { color: var(--color-success, #4ade80); border-color: var(--color-success, #4ade80); }
+  .webhook-note { font-size: 0.75rem; color: var(--color-text-tertiary, #666); line-height: 1.5; }
+  .webhook-note a { color: var(--color-accent, #00c851); }
 `;
 
 class MediaPlayerManager extends HTMLElement {
@@ -181,7 +195,7 @@ class MediaPlayerManager extends HTMLElement {
           <div class="form-group">
             <label>API Token / Key ${s.configured ? '<span style="color:var(--color-text-tertiary,#666)">(leave blank to keep existing)</span>' : ''}</label>
             <input id="apiToken" type="password" value="${s.apiToken}" placeholder="${s.configured ? '••••••••' : (s.backend === 'plex' ? 'Plex token' : 'API key')}" autocomplete="off">
-            ${s.backend === 'plex' ? '<div class="hint">Found in Plex Web → Account → Authorized Devices, or see plex.tv/claim.</div>' : ''}
+            ${s.backend === 'plex' ? '<div class="hint">See <a href="https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/" target="_blank" rel="noopener noreferrer">Finding your Plex token</a> for instructions.</div>' : ''}
             ${s.backend !== 'plex' ? '<div class="hint">Create an API key in the server dashboard under API Keys.</div>' : ''}
           </div>
           <div class="form-group">
@@ -222,6 +236,23 @@ class MediaPlayerManager extends HTMLElement {
             </div>
           </div>
 
+          ${s.backend === 'plex' ? `
+          <hr class="divider">
+          <div class="section-title">Webhooks <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--color-accent,#00c851);font-size:0.7rem;">Plex Pass required</span></div>
+          <div class="webhook-box">
+            <div class="webhook-url-row">
+              <div class="webhook-url" id="webhookUrl">${BASE_URL()}/api/channels/com.mimir.mediaplayer/webhook</div>
+              <button class="btn-copy" id="copyWebhook">Copy</button>
+            </div>
+            <p class="webhook-note">
+              Add this URL in Plex: <strong>Settings → Webhooks → Add Webhook</strong>.<br>
+              Webhooks give instant response when playback starts or stops — no polling lag.
+              When active, the poll interval backs off to 2 minutes (keeps working as a fallback).<br>
+              <a href="https://support.plex.tv/articles/115002267687-webhooks/" target="_blank" rel="noopener noreferrer">Webhook setup guide →</a>
+            </p>
+          </div>
+          ` : ''}
+
           <div class="actions">
             <button class="btn btn-primary" id="save" ${s.saving ? 'disabled' : ''}>
               ${s.saving ? '<span class="spinner"></span> Saving…' : 'Save Settings'}
@@ -243,6 +274,13 @@ class MediaPlayerManager extends HTMLElement {
     $('fitMode')?.addEventListener('change',   e => { this._state.fitMode    = e.target.value; });
     $('theme')?.addEventListener('change',     e => { this._state.theme      = e.target.value; });
     $('showInfo')?.addEventListener('change',  e => { this._state.showInfo   = e.target.checked; });
+    $('copyWebhook')?.addEventListener('click', () => {
+      const url = `${BASE_URL()}/api/channels/com.mimir.mediaplayer/webhook`;
+      navigator.clipboard?.writeText(url).then(() => {
+        const btn = $('copyWebhook');
+        if (btn) { btn.textContent = 'Copied!'; btn.classList.add('copied'); setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000); }
+      });
+    });
   }
 
   _sessionHtml(session) {
