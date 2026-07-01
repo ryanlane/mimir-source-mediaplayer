@@ -170,10 +170,9 @@ class MediaPlayerChannel:
             season_num   = None
             episode_num  = None
 
-        poster_url = None
-        if thumb_path and self.settings.server_url and self.settings.api_token:
-            base = self.settings.server_url.rstrip("/")
-            poster_url = f"{base}{thumb_path}?X-Plex-Token={self.settings.api_token}"
+        poster_url = backends.plex_poster_url(
+            self.settings.server_url, thumb_path, self.settings.api_token
+        )
 
         return {
             "title":        metadata.get("title", "Unknown"),
@@ -308,14 +307,21 @@ class MediaPlayerChannel:
         """Download poster bytes; returns None on failure."""
         if self._cached_poster_url == poster_url and self._cached_poster:
             return self._cached_poster
+        # First request to Plex's /photo/:/transcode for a given size can be
+        # slow — the server generates and caches the resized image on demand.
+        safe_url = poster_url.split("X-Plex-Token=")[0].split("api_key=")[0] + "<redacted>"
         try:
-            resp = self._http.get(poster_url, timeout=15, stream=False)
+            resp = self._http.get(poster_url, timeout=25, stream=False)
             resp.raise_for_status()
             self._cached_poster = resp.content
             self._cached_poster_url = poster_url
             return self._cached_poster
         except Exception as exc:
-            logger.warning("[media_player] poster fetch failed: %s", exc)
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            logger.warning(
+                "[media_player] poster fetch failed url=%s status=%s err=%s",
+                safe_url, status, exc,
+            )
             return None
 
     def _render(self, poster_bytes: bytes, session: Dict[str, Any], width: int, height: int) -> bytes:

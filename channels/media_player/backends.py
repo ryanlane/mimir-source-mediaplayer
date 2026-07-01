@@ -22,8 +22,32 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import quote
 
 logger = logging.getLogger("mimir.channels.media_player.backends")
+
+# Plex serves raw poster originals at full source resolution (often several
+# MB, sometimes PNG/WEBP), which is slow to fetch from LAN media servers on
+# modest hardware and can exceed the poster-fetch timeout entirely. Routing
+# through Plex's own photo transcoder gets back a small, pre-sized JPEG —
+# the same mechanism Plex Web itself uses for thumbnails — which resolves
+# far more reliably than the raw thumb/grandparentThumb path.
+_PLEX_POSTER_MAX_W = 1000
+_PLEX_POSTER_MAX_H = 1500
+
+
+def plex_poster_url(server_url: str, thumb_path: str, token: str) -> str | None:
+    if not thumb_path or not token:
+        return None
+    base = server_url.rstrip("/")
+    encoded_path = quote(thumb_path, safe="")
+    return (
+        f"{base}/photo/:/transcode"
+        f"?width={_PLEX_POSTER_MAX_W}&height={_PLEX_POSTER_MAX_H}"
+        f"&minSize=1&upscale=0&format=jpeg"
+        f"&url={encoded_path}"
+        f"&X-Plex-Token={token}"
+    )
 
 
 # ── Plex ─────────────────────────────────────────────────────────────────────
@@ -75,12 +99,7 @@ def _plex_session(settings, http_session) -> dict[str, Any] | None:
             if grandparent_thumb:
                 poster_path = grandparent_thumb
 
-        token = settings.api_token
-        poster_url = (
-            f"{settings.server_url.rstrip('/')}{poster_path}?X-Plex-Token={token}"
-            if poster_path and token
-            else None
-        )
+        poster_url = plex_poster_url(settings.server_url, poster_path, settings.api_token)
 
         return {
             "title":        title,
