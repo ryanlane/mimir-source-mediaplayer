@@ -30,6 +30,7 @@ logger = logging.getLogger("mimir.channels.media_player")
 
 _POLL_INTERVAL         = 15   # seconds between polls (no webhook activity)
 _POLL_INTERVAL_WEBHOOK = 120  # seconds between polls when webhooks are active
+_WEBHOOK_GRACE_SECONDS = 20   # ignore a poll false-negative shortly after a play/resume webhook
 _USER_AGENT = "MimirMediaPlayer/1.0 (https://github.com/ryanlane/mimir)"
 _PLUGIN_ID = "com.mimir.mediaplayer"
 
@@ -67,6 +68,7 @@ class MediaPlayerChannel:
         # Webhook state (Plex only)
         self._webhook_last_event: float = 0.0   # epoch time of last received webhook
         self._webhook_last_event_type: str = ""  # last Plex event name received
+        self._webhook_confirmed_playing_at: float = 0.0  # last time a play/resume webhook fired
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -212,6 +214,7 @@ class MediaPlayerChannel:
             self._cached_session = session
             self._cached_status = "ok"
             self._was_playing = True
+            self._webhook_confirmed_playing_at = time.time()
             if fp != self._last_session_fp:
                 self._last_session_fp = fp
                 self._image_cache.clear()
@@ -265,6 +268,18 @@ class MediaPlayerChannel:
             try:
                 loop = asyncio.get_event_loop()
                 session, status = await loop.run_in_executor(None, self._fetch_session)
+
+                if session is None and time.time() - self._webhook_confirmed_playing_at < _WEBHOOK_GRACE_SECONDS:
+                    # Plex's /sessions endpoint can lag briefly right after
+                    # playback starts. Trust a just-confirmed webhook over a
+                    # poll false-negative instead of clobbering good state
+                    # and firing a spurious stop event.
+                    logger.debug("[media_player] poll found no session but webhook confirmed recently — skipping")
+                    webhook_age = time.time() - self._webhook_last_event
+                    interval = _POLL_INTERVAL_WEBHOOK if webhook_age < 300 else _POLL_INTERVAL
+                    await asyncio.sleep(interval)
+                    continue
+
                 self._cached_session = session
                 self._cached_status = status
 
