@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, Optional
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from .models import Settings
+from .models import MediaServerSettings, Settings
 from .mimir_utils import http_session as _make_session
 from . import backends
 from . import renderer as _renderer
@@ -48,8 +48,8 @@ class MediaPlayerChannel:
             self.settings = Settings.from_dict({**self.settings.to_dict(), **config})
             self._save_settings()
 
-        # HTTP session (shared across requests; updated when settings change)
-        self._http = self._make_http()
+        # HTTP sessions, keyed by configured server id.
+        self._http_sessions: Dict[str, Any] = {}
 
         # Cached state
         self._cached_session: Optional[Dict[str, Any]] = None
@@ -79,9 +79,18 @@ class MediaPlayerChannel:
         except Exception:
             return {}
 
-    def _make_http(self):
+    def _make_http(self, server: Optional[MediaServerSettings] = None):
         sess = _make_session(_USER_AGENT)
-        sess.verify = self.settings.verify_ssl
+        sess.verify = server.verify_ssl if server else self.settings.verify_ssl
+        return sess
+
+    def _http_for_server(self, server: MediaServerSettings):
+        sess = self._http_sessions.get(server.id)
+        if sess is None:
+            sess = self._make_http(server)
+            self._http_sessions[server.id] = sess
+        else:
+            sess.verify = server.verify_ssl
         return sess
 
     # ── Settings ──────────────────────────────────────────────────────────────
@@ -104,8 +113,18 @@ class MediaPlayerChannel:
     def _masked_settings(self) -> Dict[str, Any]:
         return {
             **self.settings.to_public_dict(),
-            "configured": bool(self.settings.server_url and self.settings.api_token),
+            "configured": bool(self.settings.configured_servers()),
         }
+
+    def _reset_runtime_state(self) -> None:
+        self._http_sessions.clear()
+        self._cached_session = None
+        self._cached_status = "not_started"
+        self._cached_poster = None
+        self._cached_poster_url = None
+        self._image_cache.clear()
+        self._was_playing = False
+        self._last_session_fp = None
 
     # ── Push support ──────────────────────────────────────────────────────────
 
@@ -114,7 +133,7 @@ class MediaPlayerChannel:
         logger.info("[media_player] push listener registered")
 
     def _session_fp(self, session: Dict[str, Any]) -> str:
-        return f"{session['session_key']}|{session['is_playing']}"
+        return f"{session.get('_server_id', '')}|{session['session_key']}|{session['is_playing']}"
 
     def _fire_push(self, session: Dict[str, Any]) -> None:
         if not self._push_listener:
@@ -130,6 +149,9 @@ class MediaPlayerChannel:
             "season_num":   session.get("season_num"),
             "episode_num":  session.get("episode_num"),
             "session_key":  session.get("session_key"),
+            "server_id":    session.get("_server_id"),
+            "server_name":  session.get("server_name"),
+            "backend":      session.get("backend"),
         }
         try:
             self._push_listener({
@@ -158,7 +180,7 @@ class MediaPlayerChannel:
 
     # ── Webhook (Plex only) ───────────────────────────────────────────────────
 
-    def _normalize_webhook_metadata(self, metadata: Dict[str, Any], is_playing: bool) -> Dict[str, Any]:
+    def _normalize_webhook_metadata(self, metadata: Dict[str, Any], is_playing: bool, server: MediaServerSettings) -> Dict[str, Any]:
         """Build a session dict from a Plex webhook Metadata block."""
         media_type = metadata.get("type", "movie")  # "movie" | "episode" | "track"
         if media_type == "episode":
@@ -173,7 +195,7 @@ class MediaPlayerChannel:
             episode_num  = None
 
         poster_url = backends.plex_poster_url(
-            self.settings.server_url, thumb_path, self.settings.api_token
+            server.server_url, thumb_path, server.api_token
         )
 
         return {
@@ -186,10 +208,18 @@ class MediaPlayerChannel:
             "is_playing":   is_playing,
             "poster_url":   poster_url,
             "session_key":  str(metadata.get("ratingKey", f"wh-{time.time()}")),
+            "_server_id":   server.id,
+            "server_name":  server.name,
+            "backend":      server.backend,
         }
 
-    def process_plex_webhook(self, data: Dict[str, Any]) -> None:
+    def process_plex_webhook(self, data: Dict[str, Any], server_id: Optional[str] = None) -> None:
         """Handle a parsed Plex webhook payload dict. Called from the POST /webhook endpoint."""
+        server = self.settings.get_server(server_id) if server_id else self.settings.first_server("plex")
+        if not server or server.backend != "plex" or not server.configured:
+            logger.warning("[media_player] webhook ignored — no configured Plex server for id=%r", server_id)
+            return
+
         event = data.get("event", "")
         account = data.get("Account", {}).get("title", "")
         metadata = data.get("Metadata", {})
@@ -203,13 +233,13 @@ class MediaPlayerChannel:
         self._webhook_last_event_type = event
 
         # Honour username filter
-        if self.settings.username:
-            if account.lower() != self.settings.username.lower():
-                logger.info("[media_player] webhook skipped — account %r doesn't match filter %r", account, self.settings.username)
+        if server.username:
+            if account.lower() != server.username.lower():
+                logger.info("[media_player] webhook skipped — account %r doesn't match filter %r", account, server.username)
                 return
 
         if event in ("media.play", "media.resume"):
-            session = self._normalize_webhook_metadata(metadata, is_playing=True)
+            session = self._normalize_webhook_metadata(metadata, is_playing=True, server=server)
             fp = self._session_fp(session)
             self._cached_session = session
             self._cached_status = "ok"
@@ -254,14 +284,38 @@ class MediaPlayerChannel:
     # ── Polling ───────────────────────────────────────────────────────────────
 
     def _fetch_session(self) -> tuple[Optional[Dict[str, Any]], str]:
-        if not self.settings.server_url or not self.settings.api_token:
+        servers = self.settings.configured_servers()
+        if not servers:
             return None, "not_configured"
-        try:
-            session = backends.get_current_session(self.settings, self._http)
-            return session, "ok" if session is not None else "no_session"
-        except Exception as exc:
-            logger.warning("[media_player] poll error: %s", exc)
-            return None, "error"
+
+        first_paused: Optional[Dict[str, Any]] = None
+        saw_error = False
+        for server in servers:
+            try:
+                session = backends.get_current_session(server, self._http_for_server(server))
+            except Exception as exc:
+                saw_error = True
+                logger.warning("[media_player] poll error for %s (%s): %s", server.name, server.backend, exc)
+                continue
+
+            if not session:
+                continue
+
+            session = {
+                **session,
+                "_server_id": server.id,
+                "server_name": server.name,
+                "backend": server.backend,
+            }
+            if session.get("is_playing"):
+                return session, "ok"
+            if first_paused is None:
+                first_paused = session
+
+        if first_paused:
+            return first_paused, "ok"
+
+        return None, "error" if saw_error else "no_session"
 
     async def _poll_loop(self) -> None:
         while True:
@@ -318,7 +372,7 @@ class MediaPlayerChannel:
 
     # ── Poster fetch & render ─────────────────────────────────────────────────
 
-    def _fetch_poster(self, poster_url: str) -> Optional[bytes]:
+    def _fetch_poster(self, poster_url: str, server_id: Optional[str] = None) -> Optional[bytes]:
         """Download poster bytes; returns None on failure."""
         if self._cached_poster_url == poster_url and self._cached_poster:
             return self._cached_poster
@@ -326,7 +380,9 @@ class MediaPlayerChannel:
         # slow — the server generates and caches the resized image on demand.
         safe_url = poster_url.split("X-Plex-Token=")[0].split("api_key=")[0] + "<redacted>"
         try:
-            resp = self._http.get(poster_url, timeout=25, stream=False)
+            server = self.settings.get_server(server_id)
+            http = self._http_for_server(server) if server else self._make_http()
+            resp = http.get(poster_url, timeout=25, stream=False)
             resp.raise_for_status()
             self._cached_poster = resp.content
             self._cached_poster_url = poster_url
@@ -381,7 +437,7 @@ class MediaPlayerChannel:
             return self._build_response(cached, session, width, height, hit=True)
 
         loop = asyncio.get_event_loop()
-        poster_bytes = await loop.run_in_executor(None, self._fetch_poster, poster_url)
+        poster_bytes = await loop.run_in_executor(None, self._fetch_poster, poster_url, session.get("_server_id"))
         if not poster_bytes:
             return {"success": False, "error": "poster_fetch_failed"}
 
@@ -424,6 +480,9 @@ class MediaPlayerChannel:
                 "season_num":   session.get("season_num"),
                 "episode_num":  session.get("episode_num"),
                 "is_playing":   session.get("is_playing"),
+                "server_id":    session.get("_server_id"),
+                "server_name":  session.get("server_name"),
+                "backend":      session.get("backend"),
             },
         }
 
@@ -447,8 +506,9 @@ class MediaPlayerChannel:
                 "elements":   {"manager": "x-mediaplayer-manager"},
             },
             "healthy":    True,
-            "configured": bool(self.settings.server_url and self.settings.api_token),
+            "configured": bool(self.settings.configured_servers()),
             "backend":    self.settings.backend,
+            "backends":   sorted({server.backend for server in self.settings.configured_servers()}),
         }
 
     # ── FastAPI router ────────────────────────────────────────────────────────
@@ -480,6 +540,16 @@ class MediaPlayerChannel:
             return JSONResponse({
                 "status":  self._cached_status,
                 "session": self._cached_session,
+                "servers": [
+                    {
+                        "id": server.id,
+                        "name": server.name,
+                        "backend": server.backend,
+                        "configured": server.configured,
+                        "enabled": server.enabled,
+                    }
+                    for server in self.settings.servers
+                ],
                 "webhook": {
                     "last_event_at":   self._webhook_last_event or None,
                     "last_event_type": self._webhook_last_event_type or None,
@@ -497,26 +567,41 @@ class MediaPlayerChannel:
             except Exception:
                 return JSONResponse({"success": False, "error": "invalid JSON"}, status_code=400)
 
-            allowed = {"backend", "server_url", "api_token", "username", "verify_ssl",
-                       "fit_mode", "show_info", "theme"}
-            self.settings = Settings.from_dict({
-                **self.settings.to_dict(),
-                **{k: body[k] for k in allowed if k in body},
-            })
+            display_allowed = {"fit_mode", "show_info", "theme"}
+            next_settings = self.settings.to_dict()
+            next_settings.update({k: body[k] for k in display_allowed if k in body})
+
+            if isinstance(body.get("servers"), list):
+                existing = {server.id: server for server in self.settings.servers}
+                next_servers = []
+                for item in body["servers"]:
+                    if not isinstance(item, dict):
+                        continue
+                    server_data = dict(item)
+                    old = existing.get(str(server_data.get("id", "")))
+                    token = str(server_data.get("api_token", ""))
+                    if old and (not token or token.startswith("••••")):
+                        server_data["api_token"] = old.api_token
+                    next_servers.append(MediaServerSettings.from_dict(server_data).to_dict())
+                next_settings["servers"] = next_servers
+            else:
+                allowed = {"backend", "server_url", "api_token", "username", "verify_ssl"}
+                current = self.settings.first_server() or MediaServerSettings()
+                server_data = current.to_dict()
+                server_data.update({k: body[k] for k in allowed if k in body})
+                if "api_token" not in body:
+                    server_data["api_token"] = current.api_token
+                next_settings["servers"] = [MediaServerSettings.from_dict(server_data).to_dict()]
+
+            self.settings = Settings.from_dict(next_settings)
             self._save_settings()
-            self._http = self._make_http()  # rebuild session in case verify_ssl changed
-            self._image_cache.clear()       # invalidate render cache
-            self._cached_poster = None
-            self._cached_poster_url = None
+            self._reset_runtime_state()
             return JSONResponse({"success": True, "settings": self._masked_settings()})
 
-        @router.post("/webhook")
-        async def plex_webhook(request: Request):
-            """Receive Plex webhook events (Plex Pass required).
-            Configure this URL in Plex: Settings → Webhooks → Add Webhook.
-            """
-            if self.settings.backend != "plex":
-                return JSONResponse({"ok": False, "error": "webhook only supported for plex backend"}, status_code=400)
+        async def _handle_plex_webhook(request: Request, server_id: Optional[str] = None):
+            server = self.settings.get_server(server_id) if server_id else self.settings.first_server("plex")
+            if not server or server.backend != "plex" or not server.configured:
+                return JSONResponse({"ok": False, "error": "webhook only supported for configured plex servers"}, status_code=400)
             try:
                 form = await request.form()
                 payload_str = form.get("payload", "")
@@ -526,8 +611,19 @@ class MediaPlayerChannel:
             except Exception as exc:
                 logger.warning("[media_player] webhook parse error: %s", exc)
                 return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-            self.process_plex_webhook(data)
+            self.process_plex_webhook(data, server_id=server.id)
             return JSONResponse({"ok": True})
+
+        @router.post("/webhook")
+        async def plex_webhook(request: Request):
+            """Receive Plex webhook events (Plex Pass required).
+            Configure this URL in Plex: Settings → Webhooks → Add Webhook.
+            """
+            return await _handle_plex_webhook(request)
+
+        @router.post("/webhook/{server_id}")
+        async def plex_webhook_for_server(server_id: str, request: Request):
+            return await _handle_plex_webhook(request, server_id=server_id)
 
         @router.post("/request-image")
         async def request_image(request: Request):
